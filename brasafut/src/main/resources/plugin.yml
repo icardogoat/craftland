@@ -1,0 +1,17 @@
+name: BrasaFut
+version: 0.1.0
+main: br.com.brasafut.BrasaFutPlugin
+api-version: '1.20'
+author: icardogoat
+description: Sistema de clubes e partidas para BlockBall, em PT-BR.
+softdepend: [BlockBall]
+commands:
+  fut:
+    description: Comando principal do BrasaFut
+    usage: /fut
+    aliases: [brasafut, futebol]
+permissions:
+  brasafut.use:
+    default: true
+  brasafut.admin:
+    default: op
