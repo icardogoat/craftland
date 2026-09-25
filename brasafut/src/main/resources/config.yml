@@ -1,0 +1,26 @@
+# BrasaFut
+# Compatível por API Bukkit/Spigot 1.20+, sem NMS próprio.
+
+prefix: "&6&lBrasaFut &8» &r"
+
+clubs:
+  max-members: 12
+  min-name-length: 3
+  max-name-length: 24
+  min-tag-length: 2
+  max-tag-length: 5
+
+matches:
+  default-arena: "1"
+  auto-join-online-members: true
+  challenge-expire-seconds: 120
+
+blockball:
+  # O BrasaFut usa o BlockBall apenas como motor da partida.
+  # %arena% = arena BlockBall; %side% = red ou blue.
+  join-command: "bbjoin %arena% %side%"
+  leave-command: "bbleave"
+
+messages:
+  blockball-missing: "&cO BlockBall não foi encontrado. Clubes funcionam, mas partidas automáticas ficam desativadas."
+  no-permission: "&cVocê não tem permissão."
