@@ -2,7 +2,6 @@ package br.com.brasafut;
 
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
-import org.bukkit.OfflinePlayer;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
@@ -16,23 +15,12 @@ import java.io.File;
 import java.io.IOException;
 import java.text.Normalizer;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.Set;
-import java.util.UUID;
+import java.util.*;
 import java.util.stream.Collectors;
 
 public final class BrasaFutPlugin extends JavaPlugin implements CommandExecutor, TabCompleter {
     private ClubService clubs;
+    private ArenaEngine arenas;
     private final Map<UUID, ClubInvite> invites = new HashMap<>();
     private final Map<String, MatchChallenge> challenges = new HashMap<>();
     private String prefix;
@@ -43,700 +31,267 @@ public final class BrasaFutPlugin extends JavaPlugin implements CommandExecutor,
         prefix = color(getConfig().getString("prefix", "&6&lBrasaFut &8» &r"));
         clubs = new ClubService(this);
         clubs.load();
-
-        Objects.requireNonNull(getCommand("fut"), "Comando /fut não foi definido no plugin.yml").setExecutor(this);
-        Objects.requireNonNull(getCommand("fut"), "Comando /fut não foi definido no plugin.yml").setTabCompleter(this);
-
-        if (Bukkit.getPluginManager().getPlugin("BlockBall") == null) {
-            getLogger().warning(strip(getConfig().getString("messages.blockball-missing",
-                    "O BlockBall não foi encontrado. Clubes funcionam, mas partidas automáticas ficam desativadas.")));
-        } else {
-            getLogger().info("BlockBall detectado. Integração de partidas ativada.");
-        }
-
-        getLogger().info("BrasaFut 0.1.0 ativado. Clubes carregados: " + clubs.all().size());
+        arenas = new ArenaEngine(this);
+        arenas.enable();
+        Objects.requireNonNull(getCommand("fut")).setExecutor(this);
+        Objects.requireNonNull(getCommand("fut")).setTabCompleter(this);
+        getLogger().info("BrasaFut standalone ativado. Clubes: " + clubs.all().size() + ", arenas: " + arenas.all().size());
     }
 
     @Override
     public void onDisable() {
         if (clubs != null) clubs.save();
+        if (arenas != null) arenas.disable();
     }
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (!sender.hasPermission("brasafut.use")) {
-            msg(sender, getConfig().getString("messages.no-permission", "&cVocê não tem permissão."));
-            return true;
-        }
-
-        if (args.length == 0) {
-            help(sender);
-            return true;
-        }
-
-        String root = args[0].toLowerCase(Locale.ROOT);
+        if (!sender.hasPermission("brasafut.use")) return msg(sender, "&cVocê não tem permissão.");
+        if (args.length == 0) return help(sender);
         try {
-            return switch (root) {
+            return switch (args[0].toLowerCase(Locale.ROOT)) {
                 case "time", "clube" -> handleClub(sender, Arrays.copyOfRange(args, 1, args.length));
+                case "arena" -> handleArena(sender, Arrays.copyOfRange(args, 1, args.length));
                 case "desafiar" -> handleChallenge(sender, Arrays.copyOfRange(args, 1, args.length));
-                case "aceitar" -> handleAcceptChallenge(sender);
-                case "recusar" -> handleRejectChallenge(sender);
-                case "sairpartida" -> handleLeaveMatch(sender);
+                case "aceitar" -> acceptChallenge(sender);
+                case "recusar" -> rejectChallenge(sender);
                 case "admin" -> handleAdmin(sender, Arrays.copyOfRange(args, 1, args.length));
-                case "ajuda", "help" -> { help(sender); yield true; }
-                default -> { msg(sender, "&cSubcomando desconhecido. Use &f/fut ajuda&c."); yield true; }
+                case "ajuda", "help" -> help(sender);
+                default -> msg(sender, "&cComando desconhecido. Use &f/fut ajuda&c.");
             };
         } catch (Exception ex) {
-            getLogger().severe("Erro ao executar /fut: " + ex.getMessage());
+            getLogger().severe("Erro no /fut: " + ex.getMessage());
             ex.printStackTrace();
-            msg(sender, "&cOcorreu um erro ao executar esse comando. Veja o console.");
-            return true;
+            return msg(sender, "&cOcorreu um erro. Veja o console.");
         }
     }
 
     private boolean handleClub(CommandSender sender, String[] args) {
-        if (args.length == 0) {
-            msg(sender, "&e/fut time criar <TAG> <nome>");
-            msg(sender, "&e/fut time info [TAG]");
-            msg(sender, "&e/fut time convidar <jogador>");
-            msg(sender, "&e/fut time aceitar <TAG>");
-            msg(sender, "&e/fut time sair");
-            msg(sender, "&e/fut time expulsar <jogador>");
-            msg(sender, "&e/fut time listar");
-            return true;
-        }
-
-        String sub = args[0].toLowerCase(Locale.ROOT);
-        return switch (sub) {
+        if (args.length == 0) return msg(sender, "&e/fut time criar <TAG> <nome> | convidar | aceitar | sair | expulsar | info | listar");
+        return switch (args[0].toLowerCase(Locale.ROOT)) {
             case "criar" -> createClub(sender, args);
             case "info" -> clubInfo(sender, args);
-            case "convidar" -> invitePlayer(sender, args);
+            case "convidar" -> invite(sender, args);
             case "aceitar" -> acceptInvite(sender, args);
             case "sair" -> leaveClub(sender);
             case "expulsar" -> kickMember(sender, args);
             case "listar" -> listClubs(sender);
-            default -> {
-                msg(sender, "&cOpção de time desconhecida.");
-                yield true;
-            }
+            default -> msg(sender, "&cOpção de time inválida.");
         };
     }
 
     private boolean createClub(CommandSender sender, String[] args) {
-        Player player = requirePlayer(sender);
-        if (player == null) return true;
-        if (args.length < 3) {
-            msg(player, "&cUse: /fut time criar <TAG> <nome do clube>");
-            return true;
-        }
-        if (clubs.byMember(player.getUniqueId()).isPresent()) {
-            msg(player, "&cVocê já participa de um clube.");
-            return true;
-        }
-
+        Player p = player(sender); if (p == null) return true;
+        if (args.length < 3) return msg(p, "&cUse: /fut time criar <TAG> <nome do clube>");
+        if (clubs.byMember(p.getUniqueId()).isPresent()) return msg(p, "&cVocê já participa de um clube.");
         String tag = args[1].toUpperCase(Locale.ROOT);
-        String name = String.join(" ", Arrays.copyOfRange(args, 2, args.length)).trim();
-        int minName = getConfig().getInt("clubs.min-name-length", 3);
-        int maxName = getConfig().getInt("clubs.max-name-length", 24);
-        int minTag = getConfig().getInt("clubs.min-tag-length", 2);
-        int maxTag = getConfig().getInt("clubs.max-tag-length", 5);
-
-        if (name.length() < minName || name.length() > maxName) {
-            msg(player, "&cO nome precisa ter entre " + minName + " e " + maxName + " caracteres.");
-            return true;
-        }
-        if (!tag.matches("[A-Z0-9]{" + minTag + "," + maxTag + "}")) {
-            msg(player, "&cA TAG precisa ter " + minTag + " a " + maxTag + " letras/números, sem espaços.");
-            return true;
-        }
-        if (clubs.byNameOrTag(name).isPresent() || clubs.byNameOrTag(tag).isPresent()) {
-            msg(player, "&cJá existe um clube com esse nome ou TAG.");
-            return true;
-        }
-
-        Club club = clubs.create(name, tag, player.getUniqueId(), player.getName());
-        msg(player, "&aClube criado: &f" + club.name + " &7[&e" + club.tag + "&7]");
-        msg(player, "&7Agora convide seus amigos com &f/fut time convidar <jogador>&7.");
-        return true;
+        String name = String.join(" ", Arrays.copyOfRange(args, 2, args.length));
+        if (!tag.matches("[A-Z0-9]{2,5}")) return msg(p, "&cA TAG deve ter 2 a 5 letras/números.");
+        if (name.length() < 3 || name.length() > 24) return msg(p, "&cO nome deve ter 3 a 24 caracteres.");
+        if (clubs.byNameOrTag(tag).isPresent() || clubs.byNameOrTag(name).isPresent()) return msg(p, "&cJá existe clube com esse nome/TAG.");
+        Club c = clubs.create(name, tag, p.getUniqueId(), p.getName());
+        return msg(p, "&aClube criado: &f" + c.name + " &7[&e" + c.tag + "&7]");
     }
 
     private boolean clubInfo(CommandSender sender, String[] args) {
-        Optional<Club> found;
-        if (args.length >= 2) {
-            found = clubs.byNameOrTag(String.join(" ", Arrays.copyOfRange(args, 1, args.length)));
-        } else if (sender instanceof Player p) {
-            found = clubs.byMember(p.getUniqueId());
-        } else {
-            msg(sender, "&cUse: /fut time info <TAG>");
-            return true;
-        }
-
-        if (found.isEmpty()) {
-            msg(sender, "&cClube não encontrado.");
-            return true;
-        }
-
+        Optional<Club> found = args.length >= 2 ? clubs.byNameOrTag(String.join(" ", Arrays.copyOfRange(args,1,args.length))) :
+                (sender instanceof Player p ? clubs.byMember(p.getUniqueId()) : Optional.empty());
+        if (found.isEmpty()) return msg(sender, "&cClube não encontrado.");
         Club c = found.get();
-        msg(sender, "&8&m--------------------------------");
         msg(sender, "&6&l" + c.name + " &7[&e" + c.tag + "&7]");
-        msg(sender, "&7Dono: &f" + c.ownerName);
-        msg(sender, "&7Membros: &f" + c.members.size() + "/" + getConfig().getInt("clubs.max-members", 12));
+        msg(sender, "&7Dono: &f" + c.ownerName + " &8| &7Membros: &f" + c.members.size());
         msg(sender, "&7Campanha: &a" + c.wins + "V &e" + c.draws + "E &c" + c.losses + "D");
-        msg(sender, "&7Integrantes: &f" + c.members.values().stream()
-                .map(m -> m.lastName + (m.role.equals("OWNER") ? " &6(Dono)&f" : ""))
-                .collect(Collectors.joining("&7, &f")));
-        msg(sender, "&8&m--------------------------------");
-        return true;
+        return msg(sender, "&7Jogadores: &f" + c.members.values().stream().map(m -> m.lastName).collect(Collectors.joining("&7, &f")));
     }
 
-    private boolean invitePlayer(CommandSender sender, String[] args) {
-        Player owner = requirePlayer(sender);
-        if (owner == null) return true;
-        if (args.length < 2) {
-            msg(owner, "&cUse: /fut time convidar <jogador>");
-            return true;
-        }
-
-        Club club = clubs.byMember(owner.getUniqueId()).orElse(null);
-        if (club == null) {
-            msg(owner, "&cVocê não participa de um clube.");
-            return true;
-        }
-        if (!club.owner.equals(owner.getUniqueId())) {
-            msg(owner, "&cSomente o dono pode convidar jogadores.");
-            return true;
-        }
-        if (club.members.size() >= getConfig().getInt("clubs.max-members", 12)) {
-            msg(owner, "&cSeu clube atingiu o limite de jogadores.");
-            return true;
-        }
-
+    private boolean invite(CommandSender sender, String[] args) {
+        Player owner = player(sender); if (owner == null) return true;
+        if (args.length < 2) return msg(owner, "&cUse: /fut time convidar <jogador>");
+        Club c = clubs.byMember(owner.getUniqueId()).orElse(null);
+        if (c == null || !c.owner.equals(owner.getUniqueId())) return msg(owner, "&cSomente o dono pode convidar.");
         Player target = Bukkit.getPlayerExact(args[1]);
-        if (target == null) {
-            msg(owner, "&cEsse jogador precisa estar online.");
-            return true;
-        }
-        if (target.getUniqueId().equals(owner.getUniqueId())) {
-            msg(owner, "&cVocê já está no clube.");
-            return true;
-        }
-        if (clubs.byMember(target.getUniqueId()).isPresent()) {
-            msg(owner, "&cEsse jogador já participa de um clube.");
-            return true;
-        }
-
-        invites.put(target.getUniqueId(), new ClubInvite(club.key, Instant.now().getEpochSecond()));
-        msg(owner, "&aConvite enviado para &f" + target.getName() + "&a.");
-        msg(target, "&eVocê foi convidado para &f" + club.name + " &7[&e" + club.tag + "&7]&e.");
-        msg(target, "&7Use &f/fut time aceitar " + club.tag + " &7para entrar.");
-        return true;
+        if (target == null) return msg(owner, "&cJogador precisa estar online.");
+        if (clubs.byMember(target.getUniqueId()).isPresent()) return msg(owner, "&cEsse jogador já possui clube.");
+        invites.put(target.getUniqueId(), new ClubInvite(c.key, Instant.now().getEpochSecond()));
+        msg(target, "&eConvite para &f" + c.name + "&e. Use &f/fut time aceitar " + c.tag);
+        return msg(owner, "&aConvite enviado.");
     }
 
     private boolean acceptInvite(CommandSender sender, String[] args) {
-        Player player = requirePlayer(sender);
-        if (player == null) return true;
-        if (args.length < 2) {
-            msg(player, "&cUse: /fut time aceitar <TAG>");
-            return true;
-        }
-        if (clubs.byMember(player.getUniqueId()).isPresent()) {
-            msg(player, "&cVocê já participa de um clube.");
-            return true;
-        }
-
-        ClubInvite invite = invites.get(player.getUniqueId());
-        Club target = clubs.byNameOrTag(args[1]).orElse(null);
-        if (invite == null || target == null || !invite.clubKey.equals(target.key)) {
-            msg(player, "&cVocê não possui convite válido para esse clube.");
-            return true;
-        }
-        if (target.members.size() >= getConfig().getInt("clubs.max-members", 12)) {
-            msg(player, "&cEsse clube está cheio.");
-            return true;
-        }
-
-        clubs.addMember(target, player.getUniqueId(), player.getName(), "PLAYER");
-        invites.remove(player.getUniqueId());
-        msg(player, "&aVocê entrou no &f" + target.name + "&a.");
-        broadcastClub(target, "&e" + player.getName() + " &7entrou no clube.");
-        return true;
+        Player p = player(sender); if (p == null) return true;
+        if (args.length < 2) return msg(p, "&cUse: /fut time aceitar <TAG>");
+        if (clubs.byMember(p.getUniqueId()).isPresent()) return msg(p, "&cVocê já possui clube.");
+        Club c = clubs.byNameOrTag(args[1]).orElse(null); ClubInvite i = invites.get(p.getUniqueId());
+        if (c == null || i == null || !i.clubKey.equals(c.key)) return msg(p, "&cConvite inválido.");
+        clubs.addMember(c, p.getUniqueId(), p.getName(), "PLAYER"); invites.remove(p.getUniqueId());
+        return msg(p, "&aVocê entrou no &f" + c.name + "&a.");
     }
 
     private boolean leaveClub(CommandSender sender) {
-        Player player = requirePlayer(sender);
-        if (player == null) return true;
-        Club club = clubs.byMember(player.getUniqueId()).orElse(null);
-        if (club == null) {
-            msg(player, "&cVocê não participa de um clube.");
-            return true;
-        }
-        if (club.owner.equals(player.getUniqueId())) {
-            msg(player, "&cO dono não pode sair enquanto possuir o clube. Use /fut admin dissolver <TAG> se quiser removê-lo.");
-            return true;
-        }
-        clubs.removeMember(club, player.getUniqueId());
-        msg(player, "&eVocê saiu do clube &f" + club.name + "&e.");
-        broadcastClub(club, "&e" + player.getName() + " &7saiu do clube.");
-        return true;
+        Player p = player(sender); if (p == null) return true;
+        Club c = clubs.byMember(p.getUniqueId()).orElse(null);
+        if (c == null) return msg(p, "&cVocê não possui clube.");
+        if (c.owner.equals(p.getUniqueId())) return msg(p, "&cO dono não pode sair. Um admin pode dissolver o clube.");
+        clubs.removeMember(c, p.getUniqueId()); return msg(p, "&eVocê saiu de &f" + c.name + "&e.");
     }
 
     private boolean kickMember(CommandSender sender, String[] args) {
-        Player owner = requirePlayer(sender);
-        if (owner == null) return true;
-        if (args.length < 2) {
-            msg(owner, "&cUse: /fut time expulsar <jogador>");
-            return true;
-        }
-        Club club = clubs.byMember(owner.getUniqueId()).orElse(null);
-        if (club == null || !club.owner.equals(owner.getUniqueId())) {
-            msg(owner, "&cSomente o dono do clube pode expulsar jogadores.");
-            return true;
-        }
-
-        Member member = club.members.values().stream()
-                .filter(m -> m.lastName.equalsIgnoreCase(args[1]))
-                .findFirst().orElse(null);
-        if (member == null) {
-            msg(owner, "&cJogador não encontrado no seu clube.");
-            return true;
-        }
-        if (member.uuid.equals(club.owner)) {
-            msg(owner, "&cVocê não pode expulsar o dono.");
-            return true;
-        }
-
-        clubs.removeMember(club, member.uuid);
-        msg(owner, "&a" + member.lastName + " foi removido do clube.");
-        Player online = Bukkit.getPlayer(member.uuid);
-        if (online != null) msg(online, "&cVocê foi removido do clube &f" + club.name + "&c.");
-        return true;
+        Player p = player(sender); if (p == null) return true;
+        if (args.length < 2) return msg(p, "&cUse: /fut time expulsar <jogador>");
+        Club c = clubs.byMember(p.getUniqueId()).orElse(null);
+        if (c == null || !c.owner.equals(p.getUniqueId())) return msg(p, "&cSomente o dono pode expulsar.");
+        Member m = c.members.values().stream().filter(x -> x.lastName.equalsIgnoreCase(args[1])).findFirst().orElse(null);
+        if (m == null || m.uuid.equals(c.owner)) return msg(p, "&cJogador inválido.");
+        clubs.removeMember(c, m.uuid); return msg(p, "&aJogador removido.");
     }
 
     private boolean listClubs(CommandSender sender) {
-        List<Club> list = new ArrayList<>(clubs.all());
-        list.sort(Comparator.comparingInt((Club c) -> c.wins).reversed().thenComparing(c -> c.name));
-        if (list.isEmpty()) {
-            msg(sender, "&7Nenhum clube foi criado ainda.");
+        if (clubs.all().isEmpty()) return msg(sender, "&7Nenhum clube criado.");
+        msg(sender, "&6Clubes:");
+        clubs.all().stream().sorted(Comparator.comparing(c -> c.name)).forEach(c -> msg(sender, "&e["+c.tag+"] &f"+c.name+" &7("+c.members.size()+" jogadores)"));
+        return true;
+    }
+
+    private boolean handleArena(CommandSender sender, String[] args) {
+        if (!sender.hasPermission("brasafut.admin")) return msg(sender, "&cApenas administradores podem configurar arenas.");
+        if (args.length == 0) return arenaHelp(sender);
+        String sub = args[0].toLowerCase(Locale.ROOT);
+        if (sub.equals("listar")) {
+            if (arenas.all().isEmpty()) return msg(sender, "&7Nenhuma arena criada.");
+            arenas.all().forEach(a -> msg(sender, "&e" + a.id + (arenas.isReady(a) ? " &a[PRONTA]" : " &c[INCOMPLETA]")));
             return true;
         }
-        msg(sender, "&6Clubes cadastrados:");
-        for (Club c : list) {
-            msg(sender, "&e[" + c.tag + "] &f" + c.name + " &8- &7" + c.members.size() + " jogadores &8- &a" + c.wins + "V");
+        if (sub.equals("criar")) {
+            if (args.length < 2) return msg(sender, "&cUse: /fut arena criar <id>");
+            if (arenas.get(args[1]).isPresent()) return msg(sender, "&cEssa arena já existe.");
+            arenas.create(args[1]); return msg(sender, "&aArena criada. Agora marque os pontos com /fut arena marcar " + args[1] + " <ponto>.");
         }
-        return true;
+        if (sub.equals("remover")) {
+            if (args.length < 2) return msg(sender, "&cUse: /fut arena remover <id>");
+            return msg(sender, arenas.delete(args[1]) ? "&aArena removida." : "&cArena não encontrada.");
+        }
+        if (sub.equals("parar")) {
+            if (args.length < 2) return msg(sender, "&cUse: /fut arena parar <id>");
+            arenas.stop(args[1]); return msg(sender, "&ePartida encerrada nessa arena.");
+        }
+        if (sub.equals("marcar")) {
+            Player p = player(sender); if (p == null) return true;
+            if (args.length < 3) return msg(p, "&cUse: /fut arena marcar <id> <pos1|pos2|spawn|timeA|timeB|golA1|golA2|golB1|golB2>");
+            boolean ok = arenas.setPoint(args[1], args[2], p.getLocation());
+            return msg(p, ok ? "&aPonto &f" + args[2] + " &amarcado na sua posição." : "&cArena ou ponto inválido.");
+        }
+        if (sub.equals("info")) {
+            if (args.length < 2) return msg(sender, "&cUse: /fut arena info <id>");
+            ArenaEngine.Arena a = arenas.get(args[1]).orElse(null);
+            if (a == null) return msg(sender, "&cArena não encontrada.");
+            msg(sender, "&6Arena: &f" + a.id);
+            return msg(sender, arenas.isReady(a) ? "&aArena pronta para partidas." : "&cArena incompleta. Use /fut arena marcar.");
+        }
+        return arenaHelp(sender);
     }
 
     private boolean handleChallenge(CommandSender sender, String[] args) {
-        Player owner = requirePlayer(sender);
-        if (owner == null) return true;
-        if (args.length < 1) {
-            msg(owner, "&cUse: /fut desafiar <TAG> [arena]");
-            return true;
-        }
-
+        Player owner = player(sender); if (owner == null) return true;
+        if (args.length < 1) return msg(owner, "&cUse: /fut desafiar <TAG> [arena]");
         Club home = clubs.byMember(owner.getUniqueId()).orElse(null);
-        if (home == null || !home.owner.equals(owner.getUniqueId())) {
-            msg(owner, "&cSomente o dono de um clube pode enviar desafios.");
-            return true;
-        }
+        if (home == null || !home.owner.equals(owner.getUniqueId())) return msg(owner, "&cSomente o dono pode desafiar.");
         Club away = clubs.byNameOrTag(args[0]).orElse(null);
-        if (away == null) {
-            msg(owner, "&cClube adversário não encontrado.");
-            return true;
-        }
-        if (home.key.equals(away.key)) {
-            msg(owner, "&cVocê não pode desafiar seu próprio clube.");
-            return true;
-        }
-
-        String arena = args.length >= 2 ? args[1] : getConfig().getString("matches.default-arena", "1");
-        long now = Instant.now().getEpochSecond();
-        challenges.put(away.key, new MatchChallenge(home.key, away.key, arena, now));
-
-        msg(owner, "&aDesafio enviado: &f" + home.name + " &7x &f" + away.name + " &7na arena &e" + arena + "&a.");
-        Player awayOwner = Bukkit.getPlayer(away.owner);
-        if (awayOwner != null) {
-            msg(awayOwner, "&e" + home.name + " &fdesafiou seu clube para uma partida na arena &e" + arena + "&f.");
-            msg(awayOwner, "&7Use &f/fut aceitar &7ou &f/fut recusar&7.");
-        }
-        return true;
+        if (away == null || away.key.equals(home.key)) return msg(owner, "&cClube adversário inválido.");
+        String arena = args.length >= 2 ? args[1] : getConfig().getString("matches.default-arena", "principal");
+        ArenaEngine.Arena a = arenas.get(arena).orElse(null);
+        if (a == null || !arenas.isReady(a)) return msg(owner, "&cArena inexistente ou incompleta: &f" + arena);
+        challenges.put(away.key, new MatchChallenge(home.key, away.key, arena, Instant.now().getEpochSecond()));
+        Player target = Bukkit.getPlayer(away.owner);
+        if (target != null) msg(target, "&e" + home.name + " &fdesafiou seu clube na arena &e" + arena + "&f. Use &a/fut aceitar&f.");
+        return msg(owner, "&aDesafio enviado para &f" + away.name + "&a.");
     }
 
-    private boolean handleAcceptChallenge(CommandSender sender) {
-        Player owner = requirePlayer(sender);
-        if (owner == null) return true;
+    private boolean acceptChallenge(CommandSender sender) {
+        Player owner = player(sender); if (owner == null) return true;
         Club away = clubs.byMember(owner.getUniqueId()).orElse(null);
-        if (away == null || !away.owner.equals(owner.getUniqueId())) {
-            msg(owner, "&cSomente o dono de um clube pode aceitar desafios.");
-            return true;
-        }
-
-        MatchChallenge challenge = challenges.get(away.key);
-        if (challenge == null) {
-            msg(owner, "&cSeu clube não possui um desafio pendente.");
-            return true;
-        }
-        long expiry = getConfig().getLong("matches.challenge-expire-seconds", 120);
-        if (Instant.now().getEpochSecond() - challenge.createdAt > expiry) {
-            challenges.remove(away.key);
-            msg(owner, "&cEsse desafio expirou.");
-            return true;
-        }
-
-        Club home = clubs.byKey(challenge.homeKey).orElse(null);
-        if (home == null) {
-            challenges.remove(away.key);
-            msg(owner, "&cO clube desafiante não existe mais.");
-            return true;
-        }
-
+        if (away == null || !away.owner.equals(owner.getUniqueId())) return msg(owner, "&cSomente o dono pode aceitar.");
+        MatchChallenge ch = challenges.remove(away.key);
+        if (ch == null) return msg(owner, "&cSem desafio pendente.");
+        Club home = clubs.byKey(ch.homeKey).orElse(null); if (home == null) return msg(owner, "&cClube desafiante não existe.");
+        List<Player> teamA = onlineMembers(home), teamB = onlineMembers(away);
+        if (teamA.isEmpty() || teamB.isEmpty()) return msg(owner, "&cOs dois clubes precisam ter pelo menos 1 jogador online.");
+        ArenaEngine.StartResult result = arenas.start(ch.arena, home.name, away.name, teamA, teamB);
+        if (!result.success()) return msg(owner, "&c" + result.message());
         challenges.remove(away.key);
-        announceMatch(home, away, challenge.arena);
-        startBlockBallMatch(home, away, challenge.arena);
-        return true;
+        return msg(owner, "&aPartida iniciada: &f" + home.name + " &eX &f" + away.name);
     }
 
-    private boolean handleRejectChallenge(CommandSender sender) {
-        Player owner = requirePlayer(sender);
-        if (owner == null) return true;
-        Club club = clubs.byMember(owner.getUniqueId()).orElse(null);
-        if (club == null || !club.owner.equals(owner.getUniqueId())) {
-            msg(owner, "&cSomente o dono pode recusar desafios.");
-            return true;
-        }
-        MatchChallenge removed = challenges.remove(club.key);
-        if (removed == null) {
-            msg(owner, "&cNão há desafio pendente.");
-            return true;
-        }
-        msg(owner, "&eDesafio recusado.");
-        clubs.byKey(removed.homeKey).ifPresent(home -> {
-            Player p = Bukkit.getPlayer(home.owner);
-            if (p != null) msg(p, "&c" + club.name + " recusou o desafio.");
-        });
-        return true;
-    }
-
-    private boolean handleLeaveMatch(CommandSender sender) {
-        Player player = requirePlayer(sender);
-        if (player == null) return true;
-        String cmd = getConfig().getString("blockball.leave-command", "bbleave");
-        if (cmd == null || cmd.isBlank()) return true;
-        player.performCommand(cmd.startsWith("/") ? cmd.substring(1) : cmd);
-        return true;
+    private boolean rejectChallenge(CommandSender sender) {
+        Player p = player(sender); if (p == null) return true;
+        Club c = clubs.byMember(p.getUniqueId()).orElse(null);
+        if (c == null || !c.owner.equals(p.getUniqueId())) return msg(p, "&cSomente o dono pode recusar.");
+        return msg(p, challenges.remove(c.key) != null ? "&eDesafio recusado." : "&cSem desafio pendente.");
     }
 
     private boolean handleAdmin(CommandSender sender, String[] args) {
-        if (!sender.hasPermission("brasafut.admin")) {
-            msg(sender, "&cVocê não tem permissão de administrador.");
-            return true;
-        }
-        if (args.length == 0) {
-            msg(sender, "&e/fut admin recarregar");
-            msg(sender, "&e/fut admin dissolver <TAG>");
-            return true;
-        }
-        if (args[0].equalsIgnoreCase("recarregar")) {
-            reloadConfig();
-            prefix = color(getConfig().getString("prefix", "&6&lBrasaFut &8» &r"));
-            clubs.load();
-            msg(sender, "&aConfigurações e clubes recarregados.");
-            return true;
-        }
-        if (args[0].equalsIgnoreCase("dissolver") && args.length >= 2) {
-            Club club = clubs.byNameOrTag(args[1]).orElse(null);
-            if (club == null) {
-                msg(sender, "&cClube não encontrado.");
-                return true;
-            }
-            clubs.delete(club);
-            challenges.remove(club.key);
-            msg(sender, "&eClube &f" + club.name + " &edissolvido.");
-            return true;
-        }
-        msg(sender, "&cComando administrativo inválido.");
+        if (!sender.hasPermission("brasafut.admin")) return msg(sender, "&cSem permissão.");
+        if (args.length == 0) return msg(sender, "&e/fut admin recarregar | dissolver <TAG>");
+        if (args[0].equalsIgnoreCase("recarregar")) { reloadConfig(); prefix = color(getConfig().getString("prefix", "&6&lBrasaFut &8» &r")); clubs.load(); arenas.load(); return msg(sender, "&aRecarregado."); }
+        if (args[0].equalsIgnoreCase("dissolver") && args.length >= 2) { Club c = clubs.byNameOrTag(args[1]).orElse(null); if (c == null) return msg(sender,"&cClube não encontrado."); clubs.delete(c); return msg(sender,"&eClube dissolvido."); }
+        return msg(sender, "&cComando admin inválido.");
+    }
+
+    private List<Player> onlineMembers(Club c) {
+        List<Player> result = new ArrayList<>();
+        for (UUID id : c.members.keySet()) { Player p = Bukkit.getPlayer(id); if (p != null && p.isOnline()) result.add(p); }
+        return result;
+    }
+
+    private boolean arenaHelp(CommandSender sender) {
+        msg(sender, "&6&lEditor de Arena BrasaFut");
+        msg(sender, "&f/fut arena criar <id>");
+        msg(sender, "&f/fut arena marcar <id> pos1|pos2|spawn|timeA|timeB");
+        msg(sender, "&f/fut arena marcar <id> golA1|golA2|golB1|golB2");
+        msg(sender, "&f/fut arena info <id> | listar | remover <id> | parar <id>");
         return true;
     }
 
-    private void announceMatch(Club home, Club away, String arena) {
-        String line = "&6&lPARTIDA CONFIRMADA &8- &f" + home.name + " &eX &f" + away.name + " &8(&7Arena " + arena + "&8)";
-        broadcastClub(home, line);
-        broadcastClub(away, line);
+    private boolean help(CommandSender sender) {
+        msg(sender, "&6&lBrasaFut &7- futebol completo em um único plugin");
+        msg(sender, "&f/fut time ... &7- clubes");
+        msg(sender, "&f/fut desafiar <TAG> [arena] &7- desafiar outro clube");
+        msg(sender, "&f/fut aceitar &7- iniciar a partida");
+        if (sender.hasPermission("brasafut.admin")) msg(sender, "&f/fut arena ... &7- editor de arenas (substitui /blockball)");
+        return true;
     }
 
-    private void startBlockBallMatch(Club home, Club away, String arena) {
-        if (!getConfig().getBoolean("matches.auto-join-online-members", true)) return;
-        if (Bukkit.getPluginManager().getPlugin("BlockBall") == null) {
-            broadcastClub(home, "&cBlockBall não está instalado; entrada automática não foi executada.");
-            broadcastClub(away, "&cBlockBall não está instalado; entrada automática não foi executada.");
-            return;
-        }
-
-        joinSide(home, arena, "red");
-        joinSide(away, arena, "blue");
-    }
-
-    private void joinSide(Club club, String arena, String side) {
-        String template = getConfig().getString("blockball.join-command", "bbjoin %arena% %side%");
-        if (template == null || template.isBlank()) return;
-        for (Member member : club.members.values()) {
-            Player player = Bukkit.getPlayer(member.uuid);
-            if (player == null || !player.isOnline()) continue;
-            String cmd = template.replace("%arena%", arena).replace("%side%", side);
-            if (cmd.startsWith("/")) cmd = cmd.substring(1);
-            boolean ok = player.performCommand(cmd);
-            if (!ok) {
-                msg(player, "&cNão foi possível entrar automaticamente na arena. Tente o comando do BlockBall manualmente.");
-            }
-        }
-    }
-
-    private void broadcastClub(Club club, String text) {
-        for (Member member : club.members.values()) {
-            Player p = Bukkit.getPlayer(member.uuid);
-            if (p != null && p.isOnline()) msg(p, text);
-        }
-    }
-
-    private void help(CommandSender sender) {
-        msg(sender, "&8&m--------------------------------");
-        msg(sender, "&6&lBrasaFut &7- clubes de jogadores");
-        msg(sender, "&f/fut time criar <TAG> <nome> &7- cria seu clube");
-        msg(sender, "&f/fut time convidar <jogador> &7- convida um amigo");
-        msg(sender, "&f/fut time aceitar <TAG> &7- aceita convite");
-        msg(sender, "&f/fut time info [TAG] &7- informações do clube");
-        msg(sender, "&f/fut time listar &7- lista clubes");
-        msg(sender, "&f/fut desafiar <TAG> [arena] &7- desafia outro clube");
-        msg(sender, "&f/fut aceitar &7- aceita desafio de partida");
-        msg(sender, "&f/fut recusar &7- recusa o desafio");
-        msg(sender, "&8&m--------------------------------");
-    }
-
-    private Player requirePlayer(CommandSender sender) {
-        if (sender instanceof Player player) return player;
-        msg(sender, "&cEsse comando só pode ser usado por jogadores.");
-        return null;
-    }
-
-    private void msg(CommandSender sender, String text) {
-        sender.sendMessage(prefix + color(text));
-    }
-
-    private static String color(String text) {
-        return ChatColor.translateAlternateColorCodes('&', text == null ? "" : text);
-    }
-
-    private static String strip(String text) {
-        return ChatColor.stripColor(color(text));
-    }
+    private Player player(CommandSender s) { if (s instanceof Player p) return p; msg(s,"&cComando apenas para jogadores."); return null; }
+    private boolean msg(CommandSender s, String t) { s.sendMessage(prefix + color(t)); return true; }
+    private static String color(String t) { return ChatColor.translateAlternateColorCodes('&', t == null ? "" : t); }
+    private static String normalize(String s) { String n = Normalizer.normalize(s, Normalizer.Form.NFD).replaceAll("\\p{M}","").toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]",""); return n.isBlank()?UUID.randomUUID().toString().replace("-",""):n; }
 
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
-        if (args.length == 1) return filter(args[0], List.of("time", "desafiar", "aceitar", "recusar", "sairpartida", "ajuda"));
-        if (args.length == 2 && (args[0].equalsIgnoreCase("time") || args[0].equalsIgnoreCase("clube"))) {
-            return filter(args[1], List.of("criar", "info", "convidar", "aceitar", "sair", "expulsar", "listar"));
-        }
-        if (args.length == 2 && args[0].equalsIgnoreCase("desafiar")) {
-            return filter(args[1], clubs.all().stream().map(c -> c.tag).toList());
-        }
-        if (args.length == 3 && args[0].equalsIgnoreCase("time") && args[1].equalsIgnoreCase("info")) {
-            return filter(args[2], clubs.all().stream().map(c -> c.tag).toList());
-        }
-        if (args.length == 3 && args[0].equalsIgnoreCase("time") && args[1].equalsIgnoreCase("convidar")) {
-            return filter(args[2], Bukkit.getOnlinePlayers().stream().map(Player::getName).toList());
-        }
+        if (args.length == 1) return filter(args[0], sender.hasPermission("brasafut.admin") ? List.of("time","arena","desafiar","aceitar","recusar","admin","ajuda") : List.of("time","desafiar","aceitar","recusar","ajuda"));
+        if (args.length == 2 && args[0].equalsIgnoreCase("time")) return filter(args[1], List.of("criar","info","convidar","aceitar","sair","expulsar","listar"));
+        if (args.length == 2 && args[0].equalsIgnoreCase("arena")) return filter(args[1], List.of("criar","marcar","info","listar","remover","parar"));
+        if (args.length == 2 && args[0].equalsIgnoreCase("desafiar")) return filter(args[1], clubs.all().stream().map(c->c.tag).toList());
+        if (args.length == 3 && args[0].equalsIgnoreCase("desafiar")) return filter(args[2], arenas.all().stream().map(a->a.id).toList());
+        if (args.length == 4 && args[0].equalsIgnoreCase("arena") && args[1].equalsIgnoreCase("marcar")) return filter(args[3], List.of("pos1","pos2","spawn","timeA","timeB","golA1","golA2","golB1","golB2"));
         return Collections.emptyList();
     }
+    private List<String> filter(String q, List<String> vals) { String l=q.toLowerCase(Locale.ROOT); return vals.stream().filter(v->v.toLowerCase(Locale.ROOT).startsWith(l)).sorted().toList(); }
 
-    private List<String> filter(String input, List<String> values) {
-        String lower = input.toLowerCase(Locale.ROOT);
-        return values.stream().filter(v -> v.toLowerCase(Locale.ROOT).startsWith(lower)).sorted().toList();
-    }
-
-    private static String normalizeKey(String value) {
-        String normalized = Normalizer.normalize(value, Normalizer.Form.NFD)
-                .replaceAll("\\p{M}", "")
-                .toLowerCase(Locale.ROOT)
-                .replaceAll("[^a-z0-9]", "");
-        return normalized.isBlank() ? UUID.randomUUID().toString().replace("-", "") : normalized;
-    }
-
-    private static final class ClubInvite {
-        final String clubKey;
-        final long createdAt;
-        ClubInvite(String clubKey, long createdAt) {
-            this.clubKey = clubKey;
-            this.createdAt = createdAt;
-        }
-    }
-
-    private static final class MatchChallenge {
-        final String homeKey;
-        final String awayKey;
-        final String arena;
-        final long createdAt;
-        MatchChallenge(String homeKey, String awayKey, String arena, long createdAt) {
-            this.homeKey = homeKey;
-            this.awayKey = awayKey;
-            this.arena = arena;
-            this.createdAt = createdAt;
-        }
-    }
-
-    private static final class Member {
-        final UUID uuid;
-        String lastName;
-        String role;
-        Member(UUID uuid, String lastName, String role) {
-            this.uuid = uuid;
-            this.lastName = lastName;
-            this.role = role;
-        }
-    }
-
+    private record ClubInvite(String clubKey, long createdAt) {}
+    private record MatchChallenge(String homeKey, String awayKey, String arena, long createdAt) {}
+    private static final class Member { final UUID uuid; String lastName, role; Member(UUID u,String n,String r){uuid=u;lastName=n;role=r;} }
     private static final class Club {
-        final String key;
-        String name;
-        String tag;
-        UUID owner;
-        String ownerName;
-        int wins;
-        int draws;
-        int losses;
-        final Map<UUID, Member> members = new LinkedHashMap<>();
-
-        Club(String key) {
-            this.key = key;
-        }
+        final String key; String name, tag, ownerName; UUID owner; int wins, draws, losses; final Map<UUID,Member> members=new LinkedHashMap<>();
+        Club(String key){this.key=key;}
     }
 
     private static final class ClubService {
-        private final BrasaFutPlugin plugin;
-        private final File file;
-        private final Map<String, Club> data = new LinkedHashMap<>();
-
-        ClubService(BrasaFutPlugin plugin) {
-            this.plugin = plugin;
-            this.file = new File(plugin.getDataFolder(), "clubs.yml");
-        }
-
-        void load() {
-            data.clear();
-            if (!file.exists()) return;
-            YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
-            ConfigurationSection root = yaml.getConfigurationSection("clubs");
-            if (root == null) return;
-
-            for (String key : root.getKeys(false)) {
-                ConfigurationSection s = root.getConfigurationSection(key);
-                if (s == null) continue;
-                try {
-                    Club c = new Club(key);
-                    c.name = s.getString("name", key);
-                    c.tag = s.getString("tag", key.toUpperCase(Locale.ROOT));
-                    c.owner = UUID.fromString(Objects.requireNonNull(s.getString("owner")));
-                    c.ownerName = s.getString("owner-name", "Desconhecido");
-                    c.wins = s.getInt("stats.wins", 0);
-                    c.draws = s.getInt("stats.draws", 0);
-                    c.losses = s.getInt("stats.losses", 0);
-
-                    ConfigurationSection ms = s.getConfigurationSection("members");
-                    if (ms != null) {
-                        for (String uuidText : ms.getKeys(false)) {
-                            UUID uuid = UUID.fromString(uuidText);
-                            String lastName = ms.getString(uuidText + ".name", "Jogador");
-                            String role = ms.getString(uuidText + ".role", "PLAYER");
-                            c.members.put(uuid, new Member(uuid, lastName, role));
-                        }
-                    }
-                    if (!c.members.containsKey(c.owner)) {
-                        c.members.put(c.owner, new Member(c.owner, c.ownerName, "OWNER"));
-                    }
-                    data.put(c.key, c);
-                } catch (Exception ex) {
-                    plugin.getLogger().warning("Clube inválido ignorado em clubs.yml: " + key + " (" + ex.getMessage() + ")");
-                }
-            }
-        }
-
-        Club create(String name, String tag, UUID owner, String ownerName) {
-            String base = normalizeKey(tag);
-            String key = base;
-            int i = 2;
-            while (data.containsKey(key)) key = base + i++;
-            Club c = new Club(key);
-            c.name = name;
-            c.tag = tag;
-            c.owner = owner;
-            c.ownerName = ownerName;
-            c.members.put(owner, new Member(owner, ownerName, "OWNER"));
-            data.put(key, c);
-            save();
-            return c;
-        }
-
-        void addMember(Club club, UUID uuid, String name, String role) {
-            club.members.put(uuid, new Member(uuid, name, role));
-            save();
-        }
-
-        void removeMember(Club club, UUID uuid) {
-            club.members.remove(uuid);
-            save();
-        }
-
-        void delete(Club club) {
-            data.remove(club.key);
-            save();
-        }
-
-        Optional<Club> byMember(UUID uuid) {
-            return data.values().stream().filter(c -> c.members.containsKey(uuid)).findFirst();
-        }
-
-        Optional<Club> byNameOrTag(String value) {
-            String v = value.trim();
-            String normalized = normalizeKey(v);
-            return data.values().stream().filter(c ->
-                    c.key.equalsIgnoreCase(normalized)
-                            || c.tag.equalsIgnoreCase(v)
-                            || c.name.equalsIgnoreCase(v)).findFirst();
-        }
-
-        Optional<Club> byKey(String key) {
-            return Optional.ofNullable(data.get(key));
-        }
-
-        Set<Club> all() {
-            return Set.copyOf(data.values());
-        }
-
-        void save() {
-            if (!plugin.getDataFolder().exists() && !plugin.getDataFolder().mkdirs()) {
-                plugin.getLogger().warning("Não foi possível criar a pasta do BrasaFut.");
-                return;
-            }
-            YamlConfiguration yaml = new YamlConfiguration();
-            for (Club c : data.values()) {
-                String p = "clubs." + c.key;
-                yaml.set(p + ".name", c.name);
-                yaml.set(p + ".tag", c.tag);
-                yaml.set(p + ".owner", c.owner.toString());
-                yaml.set(p + ".owner-name", c.ownerName);
-                yaml.set(p + ".stats.wins", c.wins);
-                yaml.set(p + ".stats.draws", c.draws);
-                yaml.set(p + ".stats.losses", c.losses);
-                for (Member m : c.members.values()) {
-                    String mp = p + ".members." + m.uuid;
-                    yaml.set(mp + ".name", m.lastName);
-                    yaml.set(mp + ".role", m.role);
-                }
-            }
-            try {
-                yaml.save(file);
-            } catch (IOException ex) {
-                plugin.getLogger().severe("Não foi possível salvar clubs.yml: " + ex.getMessage());
-            }
-        }
+        private final BrasaFutPlugin plugin; private final File file; private final Map<String,Club> data=new LinkedHashMap<>();
+        ClubService(BrasaFutPlugin p){plugin=p;file=new File(p.getDataFolder(),"clubs.yml");}
+        void load(){ data.clear(); if(!file.exists())return; YamlConfiguration y=YamlConfiguration.loadConfiguration(file); ConfigurationSection root=y.getConfigurationSection("clubs"); if(root==null)return; for(String key:root.getKeys(false)){ try{ ConfigurationSection s=root.getConfigurationSection(key); if(s==null)continue; Club c=new Club(key); c.name=s.getString("name",key); c.tag=s.getString("tag",key.toUpperCase(Locale.ROOT)); c.owner=UUID.fromString(Objects.requireNonNull(s.getString("owner"))); c.ownerName=s.getString("owner-name","Jogador"); c.wins=s.getInt("stats.wins"); c.draws=s.getInt("stats.draws"); c.losses=s.getInt("stats.losses"); ConfigurationSection ms=s.getConfigurationSection("members"); if(ms!=null)for(String us:ms.getKeys(false)){UUID u=UUID.fromString(us); c.members.put(u,new Member(u,ms.getString(us+".name","Jogador"),ms.getString(us+".role","PLAYER")));} if(!c.members.containsKey(c.owner))c.members.put(c.owner,new Member(c.owner,c.ownerName,"OWNER")); data.put(c.key,c);}catch(Exception ex){plugin.getLogger().warning("Clube inválido: "+key+" - "+ex.getMessage());}} }
+        Club create(String name,String tag,UUID owner,String ownerName){String base=normalize(tag),key=base;int i=2;while(data.containsKey(key))key=base+i++;Club c=new Club(key);c.name=name;c.tag=tag;c.owner=owner;c.ownerName=ownerName;c.members.put(owner,new Member(owner,ownerName,"OWNER"));data.put(key,c);save();return c;}
+        void addMember(Club c,UUID u,String n,String r){c.members.put(u,new Member(u,n,r));save();} void removeMember(Club c,UUID u){c.members.remove(u);save();} void delete(Club c){data.remove(c.key);save();}
+        Optional<Club> byMember(UUID u){return data.values().stream().filter(c->c.members.containsKey(u)).findFirst();} Optional<Club> byNameOrTag(String v){return data.values().stream().filter(c->c.tag.equalsIgnoreCase(v)||c.name.equalsIgnoreCase(v)||c.key.equalsIgnoreCase(normalize(v))).findFirst();} Optional<Club> byKey(String k){return Optional.ofNullable(data.get(k));} Collection<Club> all(){return data.values();}
+        void save(){if(!plugin.getDataFolder().exists())plugin.getDataFolder().mkdirs();YamlConfiguration y=new YamlConfiguration();for(Club c:data.values()){String p="clubs."+c.key; y.set(p+".name",c.name);y.set(p+".tag",c.tag);y.set(p+".owner",c.owner.toString());y.set(p+".owner-name",c.ownerName);y.set(p+".stats.wins",c.wins);y.set(p+".stats.draws",c.draws);y.set(p+".stats.losses",c.losses);for(Member m:c.members.values()){String mp=p+".members."+m.uuid;y.set(mp+".name",m.lastName);y.set(mp+".role",m.role);}}try{y.save(file);}catch(IOException e){plugin.getLogger().severe("Erro salvando clubs.yml: "+e.getMessage());}}
     }
 }
