@@ -3,25 +3,21 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
-
     <groupId>br.com.brasafut</groupId>
     <artifactId>brasafut</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.0</version>
     <name>BrasaFut</name>
-    <description>Clubes e partidas de futebol para servidores Paper/Purpur usando BlockBall como motor.</description>
-
+    <description>Futebol completo standalone para Spigot/Paper/Purpur 1.20+.</description>
     <properties>
         <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
-
     <repositories>
         <repository>
             <id>spigot-repo</id>
             <url>https://hub.spigotmc.org/nexus/content/repositories/snapshots/</url>
         </repository>
     </repositories>
-
     <dependencies>
         <dependency>
             <groupId>org.spigotmc</groupId>
@@ -30,7 +26,6 @@
             <scope>provided</scope>
         </dependency>
     </dependencies>
-
     <build>
         <finalName>BrasaFut-${project.version}</finalName>
         <plugins>
@@ -38,9 +33,7 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.13.0</version>
-                <configuration>
-                    <release>17</release>
-                </configuration>
+                <configuration><release>17</release></configuration>
             </plugin>
         </plugins>
     </build>
